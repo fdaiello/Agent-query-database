@@ -1,93 +1,84 @@
 import os
 from dotenv import load_dotenv
-from langchain_openai import OpenAI
-from langchain.agents import create_tool_calling_agent
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.tools import Tool
 import boto3
+from langchain_openai import ChatOpenAI
+from langchain_core.tools import tool
+from langchain.agents import initialize_agent, AgentType
 
-# Redshift Data API config
+# --- Step 1: Load environment variables ---
+load_dotenv()
+
+AWS_REGION = os.getenv("AWS_REGION")
 REDSHIFT_CLUSTER_ID = os.getenv("REDSHIFT_CLUSTER_ID")
 REDSHIFT_DATABASE = os.getenv("REDSHIFT_DATABASE")
 REDSHIFT_DB_USER = os.getenv("REDSHIFT_DB_USER")
-REDSHIFT_WORKGROUP_NAME = os.getenv("REDSHIFT_WORKGROUP_NAME")
-AWS_REGION = os.getenv("AWS_REGION")
 
-class RedshiftDataAPIWrapper:
-    """Minimal wrapper for Redshift Data API for LangChain agent compatibility. Supports provisioned and serverless."""
-    def __init__(self):
-        self.client = boto3.client("redshift-data", region_name=AWS_REGION)
-    def run(self, query: str):
-        kwargs = {
-            "Database": REDSHIFT_DATABASE,
-            "Sql": query
-        }
-        if REDSHIFT_WORKGROUP_NAME:
-            kwargs["WorkgroupName"] = REDSHIFT_WORKGROUP_NAME
-        else:
-            kwargs["ClusterIdentifier"] = REDSHIFT_CLUSTER_ID
-            kwargs["DbUser"] = REDSHIFT_DB_USER
-        resp = self.client.execute_statement(**kwargs)
-        qid = resp["Id"]
+if not all([AWS_REGION, REDSHIFT_CLUSTER_ID, REDSHIFT_DATABASE, REDSHIFT_DB_USER]):
+    raise ValueError("Missing AWS Redshift environment variables in .env")
+
+# --- Step 2: Create boto3 Redshift Data API client ---
+redshift_client = boto3.client("redshift-data", region_name=AWS_REGION)
+
+# --- Step 3: Define a LangChain tool to run queries ---
+@tool
+def query_redshift(sql: str) -> str:
+    """
+    Run a SQL query against AWS Redshift using the Data API and return results as a string.
+    """
+    try:
+        # Submit query
+        res = redshift_client.execute_statement(
+            ClusterIdentifier=REDSHIFT_CLUSTER_ID,
+            Database=REDSHIFT_DATABASE,
+            DbUser=REDSHIFT_DB_USER,
+            Sql=sql
+        )
+        query_id = res["Id"]
+
         # Wait for completion
         while True:
-            desc = self.client.describe_statement(Id=qid)
-            if desc["Status"] in ("FINISHED", "FAILED", "ABORTED"):
+            status = redshift_client.describe_statement(Id=query_id)
+            if status["Status"] in ["FINISHED", "FAILED", "ABORTED"]:
                 break
-        if desc["Status"] != "FINISHED":
-            raise RuntimeError(f"Query failed: {desc.get('Error', 'Unknown')}")
-        result_resp = self.client.get_statement_result(Id=qid)
-        columns = [c["name"] for c in result_resp["ColumnMetadata"]]
-        results = []
-        for rec in result_resp["Records"]:
-            row = {}
-            for col, val in zip(columns, rec):
-                row[col] = list(val.values())[0] if val else None
-            results.append(row)
-        return results
 
-# Try loading .env (safe for local dev)
-env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
-if os.path.exists(env_path):
-    load_dotenv(dotenv_path=env_path)
+        if status["Status"] != "FINISHED":
+            return f"Query failed: {status.get('Error', 'Unknown error')}"
 
-openai_api_key = os.getenv("OPENAI_API_KEY")
-if not openai_api_key:
-    raise EnvironmentError("OPENAI_API_KEY is not set in environment variables.")
+        # Fetch results
+        result = redshift_client.get_statement_result(Id=query_id)
+        # Format nicely
+        columns = [col["name"] for col in result["ColumnMetadata"]]
+        rows = [
+            dict(zip(columns, [v.get("stringValue", "") for v in row]))
+            for row in result["Records"]
+        ]
+        return str(rows)
 
-llm = OpenAI(temperature=0, api_key=openai_api_key)
+    except Exception as e:
+        return f"Error running query: {str(e)}"
 
-db = RedshiftDataAPIWrapper()
-
-# Define the Redshift tool for the agent
-redshift_tool = Tool(
-    name="Redshift SQL",
-    func=lambda q: str(db.run(q)),
-    description="Executes SQL against AWS Redshift via Data API and returns results as a list of dicts."
+# --- Step 4: LLM configuration ---
+llm = ChatOpenAI(
+    model="gpt-4o",
+    temperature=0
 )
 
-tools = [redshift_tool]
-
-prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a helpful AI assistant that can answer questions by querying an AWS Redshift database."),
-    MessagesPlaceholder("chat_history"),
-    ("human", "{input}"),
-    MessagesPlaceholder("agent_scratchpad"),
-])
-
-agent = create_tool_calling_agent(
-    llm,
-    tools,
-    prompt,
+# --- Step 5: Agent with Redshift tool ---
+agent_executor = initialize_agent(
+    tools=[query_redshift],
+    llm=llm,
+    agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+    verbose=True
 )
 
-def ask_question(question: str):
-    """Ask a natural language question and get the answer from the database."""
-    messages = [HumanMessage(content=question)]
-    return agent.invoke({"input": question, "chat_history": [], "agent_scratchpad": []})
-
-if __name__ == "__main__":
-    user_question = input("Ask a question about your data: ")
-    answer = ask_question(user_question)
-    print("Answer:", answer)
+# --- Step 6: Interactive query loop ---
+print("💬 Ask me questions about your Redshift database! (type 'exit' to quit)")
+while True:
+    user_input = input("\n❓ Your question: ")
+    if user_input.strip().lower() in {"exit", "quit"}:
+        break
+    try:
+        response = agent_executor.run(user_input)
+        print("\n📊 Answer:", response)
+    except Exception as e:
+        print("⚠️ Error:", str(e))
