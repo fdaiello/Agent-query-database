@@ -9,12 +9,12 @@ from langchain.agents import initialize_agent, AgentType
 load_dotenv()
 
 AWS_REGION = os.getenv("AWS_REGION")
-REDSHIFT_CLUSTER_ID = os.getenv("REDSHIFT_CLUSTER_ID")
+REDSHIFT_WORKGROUP_NAME = os.getenv("REDSHIFT_WORKGROUP_NAME")
 REDSHIFT_DATABASE = os.getenv("REDSHIFT_DATABASE")
-REDSHIFT_DB_USER = os.getenv("REDSHIFT_DB_USER")
+# For serverless, DbUser is not required
 
-if not all([AWS_REGION, REDSHIFT_CLUSTER_ID, REDSHIFT_DATABASE, REDSHIFT_DB_USER]):
-    raise ValueError("Missing AWS Redshift environment variables in .env")
+if not all([AWS_REGION, REDSHIFT_WORKGROUP_NAME, REDSHIFT_DATABASE]):
+    raise ValueError("Missing AWS Redshift Serverless environment variables in .env")
 
 # --- Step 2: Create boto3 Redshift Data API client ---
 redshift_client = boto3.client("redshift-data", region_name=AWS_REGION)
@@ -23,14 +23,13 @@ redshift_client = boto3.client("redshift-data", region_name=AWS_REGION)
 @tool
 def query_redshift(sql: str) -> str:
     """
-    Run a SQL query against AWS Redshift using the Data API and return results as a string.
+    Run a SQL query against AWS Redshift Serverless using the Data API and return results as a string.
     """
     try:
         # Submit query
         res = redshift_client.execute_statement(
-            ClusterIdentifier=REDSHIFT_CLUSTER_ID,
+            WorkgroupName=REDSHIFT_WORKGROUP_NAME,
             Database=REDSHIFT_DATABASE,
-            DbUser=REDSHIFT_DB_USER,
             Sql=sql
         )
         query_id = res["Id"]
@@ -72,7 +71,7 @@ agent_executor = initialize_agent(
 )
 
 # --- Step 6: Interactive query loop ---
-print("💬 Ask me questions about your Redshift database! (type 'exit' to quit)")
+print("💬 Ask me questions about your Redshift Serverless database! (type 'exit' to quit)")
 while True:
     user_input = input("\n❓ Your question: ")
     if user_input.strip().lower() in {"exit", "quit"}:
