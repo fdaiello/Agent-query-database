@@ -1,44 +1,82 @@
 import os
 from dotenv import load_dotenv
+import boto3
 from langchain_openai import ChatOpenAI
-from langchain_community.agent_toolkits import SQLDatabaseToolkit
-from langchain_community.utilities import SQLDatabase
-from langchain_community.agent_toolkits.sql.base import create_sql_agent  # ✅ Updated import
-from langchain.agents.agent_types import AgentType  # still valid
+from langchain_core.tools import tool
+from langchain.agents import initialize_agent, AgentType
 
-# Load .env for API keys and DB credentials
+# --- Step 1: Load environment variables ---
 load_dotenv()
 
-# --- Step 1: Configure database connection ---
-db_uri = os.getenv("DB_URI")
-if not db_uri:
-    raise ValueError("DB_URI not set in .env file")
+AWS_REGION = os.getenv("AWS_REGION")
+REDSHIFT_CLUSTER_ID = os.getenv("REDSHIFT_CLUSTER_ID")
+REDSHIFT_DATABASE = os.getenv("REDSHIFT_DATABASE")
+REDSHIFT_DB_USER = os.getenv("REDSHIFT_DB_USER")
 
-db = SQLDatabase.from_uri(db_uri)
+if not all([AWS_REGION, REDSHIFT_CLUSTER_ID, REDSHIFT_DATABASE, REDSHIFT_DB_USER]):
+    raise ValueError("Missing AWS Redshift environment variables in .env")
 
-# --- Step 2: Create LLM and Toolkit ---
+# --- Step 2: Create boto3 Redshift Data API client ---
+redshift_client = boto3.client("redshift-data", region_name=AWS_REGION)
+
+# --- Step 3: Define a LangChain tool to run queries ---
+@tool
+def query_redshift(sql: str) -> str:
+    """
+    Run a SQL query against AWS Redshift using the Data API and return results as a string.
+    """
+    try:
+        # Submit query
+        res = redshift_client.execute_statement(
+            ClusterIdentifier=REDSHIFT_CLUSTER_ID,
+            Database=REDSHIFT_DATABASE,
+            DbUser=REDSHIFT_DB_USER,
+            Sql=sql
+        )
+        query_id = res["Id"]
+
+        # Wait for completion
+        while True:
+            status = redshift_client.describe_statement(Id=query_id)
+            if status["Status"] in ["FINISHED", "FAILED", "ABORTED"]:
+                break
+
+        if status["Status"] != "FINISHED":
+            return f"Query failed: {status.get('Error', 'Unknown error')}"
+
+        # Fetch results
+        result = redshift_client.get_statement_result(Id=query_id)
+        # Format nicely
+        columns = [col["name"] for col in result["ColumnMetadata"]]
+        rows = [
+            dict(zip(columns, [v.get("stringValue", "") for v in row]))
+            for row in result["Records"]
+        ]
+        return str(rows)
+
+    except Exception as e:
+        return f"Error running query: {str(e)}"
+
+# --- Step 4: LLM configuration ---
 llm = ChatOpenAI(
-    model="gpt-4o",  # or gpt-4, gpt-3.5-turbo
+    model="gpt-4o",
     temperature=0
 )
 
-toolkit = SQLDatabaseToolkit(db=db, llm=llm)
-
-# --- Step 3: Create SQL Agent ---
-agent_executor = create_sql_agent(
+# --- Step 5: Agent with Redshift tool ---
+agent_executor = initialize_agent(
+    tools=[query_redshift],
     llm=llm,
-    toolkit=toolkit,
-    agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+    agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
     verbose=True
 )
 
-# --- Step 4: Interactive query loop ---
-print("💬 Ask me questions about your database! (type 'exit' to quit)")
+# --- Step 6: Interactive query loop ---
+print("💬 Ask me questions about your Redshift database! (type 'exit' to quit)")
 while True:
     user_input = input("\n❓ Your question: ")
     if user_input.strip().lower() in {"exit", "quit"}:
         break
-
     try:
         response = agent_executor.run(user_input)
         print("\n📊 Answer:", response)
