@@ -10,8 +10,6 @@ from langchain.agents.agent_types import AgentType  # still valid
 load_dotenv()
 
 # --- Step 1: Configure database connection ---
-# Example for PostgreSQL:
-# Format: postgresql+psycopg2://username:password@host:port/dbname
 db_uri = os.getenv("DB_URI")
 if not db_uri:
     raise ValueError("DB_URI not set in .env file")
