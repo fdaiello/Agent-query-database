@@ -28,7 +28,7 @@ You can modify the agent to use JDBC or other database drivers (e.g., PostgreSQL
 1. Clone the repository.
 2. Create a `.env` file with your AWS and Redshift credentials:
    ```ini
-   AWS_REGION=us-east-1
+   AWS_REGION=your-region
    REDSHIFT_WORKGROUP_NAME=your-workgroup
    REDSHIFT_DATABASE=your-database
    REDSHIFT_SCHEMA=your-schema
